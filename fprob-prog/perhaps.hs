@@ -3,6 +3,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 import Control.Monad
+import Control.Monad.Trans
 
 newtype Prob = P Float
     deriving (Eq, Ord, Num)
@@ -48,3 +49,44 @@ instance MonadPerhaps Perhaps where
     perhaps = Perhaps
     never   = Perhaps undefined 0
 
+-- PerhapsT
+newtype PerhapsT m a = PerhapsT { runPerhapsT :: m (Perhaps a) }
+
+instance MonadTrans PerhapsT where
+    lift x = PerhapsT (liftM return x)
+
+instance Monad m => Monad (PerhapsT m) where
+    return   = lift . return
+    pt >>= f = PerhapsT x
+        where x = do
+                ptv <- runPerhapsT pt
+                case ptv of
+                    Perhaps x1 p1
+                        | p1 == 0   -> return never
+                        | otherwise -> do
+                                (Perhaps x2 p2) <- runPerhapsT (f x1)
+                                return $ Perhaps x2 (p1 * p2) 
+    
+instance Monad m => Functor (PerhapsT m) where
+    fmap = liftM
+
+instance Monad m => Applicative (PerhapsT m) where
+    pure  = pure
+    (<*>) = ap
+
+-- Now that we can endow monads with a stochastic component, lets define
+-- our distributions.
+
+type Dist = PerhapsT []
+
+-- A standard way to get a probability distribution is to start with a sample space with
+-- "relative weights" and normalizing
+
+normalizeWeights :: [(a, Float)] -> Dist a
+normalizeWeights [] = error "empty dist"
+normalizeWeights xs = PerhapsT $ map prob xs
+    where prob (x,wgt) = Perhaps x (P (wgt/total))
+          total = foldr (\(_,wgt) acc -> acc + wgt) 0 xs
+
+uniform :: [a] -> Dist a -- uniform distribution
+uniform xs = normalizeWeights $ map (\x -> (x,1)) xs
