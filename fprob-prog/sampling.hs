@@ -1,9 +1,13 @@
 -- Defining probability distributions via sampling.
 
 {-# LANGUAGE GeneralizedNewtypeDeriving, TypeSynonymInstances, FlexibleInstances #-}
+{-# LANGUAGE InstanceSigs #-}
 
+import Data.List
+import System.Random
 import Control.Monad
 import Control.Monad.Trans
+import Control.Monad.Trans.Maybe
 
 type Weight = Float
 
@@ -31,7 +35,7 @@ family = do
 -- and sampling functions.
 
 newtype Prob = P Float
-    deriving (Eq, Ord, Num)
+    deriving (Eq, Ord, Num, Fractional)
 
 instance Show Prob where
     show (P p) = show intPart ++ "." ++ show fracPart ++ "%"
@@ -116,4 +120,138 @@ exact = runPerhapsT
 -- For continuous variables, finite distributions won't cut it. In fact, enumerating our
 -- choices in a list is impossible. Instead, we change paradigms and define distributions
 -- as functions we can sample from.
+
+newtype Rand a = Rand { runRand :: IO a }
+
+randomFloat :: Rand Float
+randomFloat = Rand $ getStdRandom random
+
+instance Functor Rand where
+    fmap = liftM
+instance Applicative Rand where
+    pure  = return
+    (<*>) = ap
+
+instance Monad Rand where
+    return x = Rand $ return x
+    r >>= f  = Rand $ do x <- runRand r
+                         runRand (f x)
+
+-- The upshot is that we can turn any finitely-supported distribution into a sampling function.
+
+toSampler :: FDist a -> Rand a
+toSampler fd = do
+    n <- randomFloat
+    sample (P n) (runPerhapsT fd)
+
+sample :: Monad m => Prob -> [Perhaps a] -> m a
+sample _ [] = error "nothing here"
+sample n ((Perhaps x p):ps)
+    | n <= p    = return x
+    | otherwise = sample (n-p) ps
+
+randSamples :: Rand a -> Int -> Rand [a]
+randSamples r n = sequence $ replicate n r
+
+randSamplesIO :: Rand a -> Int -> IO [a]
+randSamplesIO r n = runRand $ randSamples r n
+
+instance Dist Rand where
+    normalize = toSampler . normalize
+
+-- display histogram of sampling results
+histogram :: Ord a => [a] -> [Int]
+histogram =  map length . group . sort
+
+---- EXAMPLE) bayes rule
+
+data Test = Pos | Neg
+    deriving (Show, Eq)
+
+data Status = Flu | Healthy
+    deriving (Show, Eq)
+
+outcomes :: [(Status, Test)]
+outcomes = do
+    status <- [Flu, Healthy]
+    test   <- [Pos, Neg]
+    return (status, test)
+
+fluTest1 :: FDist (Status, Test)
+fluTest1 = do
+    status <- normalize [(Flu,10), (Healthy,90)]
+    test   <- if status == Flu
+              then normalize [(Pos,70), (Neg,30)]
+              else normalize [(Pos,10), (Neg,90)]
+    return (status, test)
+
+-- bayes rule requires us to collapse some of the results together, so we mask possibilities
+-- using the maybe monad
+
+fluTest2 :: FDist (Maybe Status)
+fluTest2 = do
+    (status, test) <- fluTest1
+    return (if test == Pos
+            then Just status
+            else Nothing)
+
+-- we want to get rid of the nothings and renormalize for the justs
+
+-- getters and setters
+value (Perhaps x _) = x
+prob (Perhaps _ p)  = p
+
+combineMaybes :: [Perhaps (Maybe a)] -> [Perhaps a]
+combineMaybes [] = []
+combineMaybes ((Perhaps Nothing _):ps)  = combineMaybes ps
+combineMaybes ((Perhaps (Just x) p):ps) =
+    (Perhaps x p) : (combineMaybes ps)
+
+extractJusts :: FDist (Maybe a) -> FDist a
+extractJusts dist
+    | totalp > 0 = PerhapsT $ map norm filtered
+    | otherwise  = PerhapsT []
+    where
+        filtered = combineMaybes $ runPerhapsT dist
+        totalp   = sum (map prob filtered)
+        norm (Perhaps x p) = Perhaps x (p / totalp)
+
+fluTest3 :: FDist Status
+fluTest3 = extractJusts fluTest2
+
+-- in ghci, typing runPerhapsT fluTest3 returns
+-- > [Perhaps Flu 43.8%,Perhaps Healthy 56.2%]
+
+-- how do we automate this reasoning into the monad? Use the MaybeT transformer!
+
+type FBDist = MaybeT FDist -- finite "bayesian dist"
+
+instance Dist FBDist where
+    normalize = lift . normalize
+
+-- now to combine the bayesian inference into one
+
+condition :: Bool -> FBDist ()
+condition True  = MaybeT $ return (Just ())
+condition False = MaybeT $ return Nothing
+
+bayesTest :: FBDist Status -> FBDist Status
+bayesTest prior = do
+    status <- prior
+    test   <- if status == Flu
+              then normalize [(Pos,70), (Neg,30)]
+              else normalize [(Pos,10), (Neg,90)]
+    condition (test == Pos)
+    return status
+
+getBayes :: FBDist Status -> [Perhaps Status]
+getBayes = runPerhapsT . extractJusts . runMaybeT
+
+prior :: FBDist Status
+prior = normalize [(Flu,10), (Healthy,90)]
+
+-- in ghci, running getBayes (bayesTest prior)
+-- gives the same answer!
+
+---- EXAMPLE) robot localization using particle filters
 
