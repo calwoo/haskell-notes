@@ -2,6 +2,8 @@
 
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
+module Perhaps where
+
 import Control.Monad
 import Control.Monad.Trans
 
