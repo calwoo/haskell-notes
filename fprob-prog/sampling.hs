@@ -255,3 +255,35 @@ prior = normalize [(Flu,10), (Healthy,90)]
 
 ---- EXAMPLE) robot localization using particle filters
 
+-- A particle system can be represented as a function that maps an integer to a random list of particles.
+
+newtype PS a = PS { runPS :: Int -> Rand [a] }
+
+-- we can take any Rand a value and build a particle system by just repeatedly sampling
+
+liftRand :: Rand a -> PS a
+liftRand r = PS (randSamples r)
+
+instance Functor PS where
+    fmap f ps = PS $ mapped
+        where mapped n = liftM (map f) (runPS ps n)
+
+instance Applicative PS where
+    pure  = return
+    (<*>) = ap
+
+instance Monad PS where
+    return   = liftRand . return
+    ps >>= f = joinPS (fmap f ps)
+
+joinPS :: PS (PS a) -> PS a
+joinPS pps = PS $ joinPS' pps
+
+joinPS' :: PS (PS a) -> Int -> Rand [a]
+joinPS' pps n = do
+    ps <- runPS pps n
+    xs <- sequence (map (\x -> runPS x 1) ps)
+    return (concat xs)
+
+instance Dist PS where
+    normalize = liftRand . normalize
